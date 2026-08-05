@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytes = "1.12.1"
+thiserror = "2.0.19"
+
+[[bin]]
+name = "test"
+path = "src/bin/test.rs"
