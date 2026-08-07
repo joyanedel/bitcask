@@ -146,7 +146,10 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
     }
 
     pub fn list_keys(&self) -> Vec<bytes::Bytes> {
-        todo!("implement list keys method")
+        self.hashmap
+            .keys()
+            .map(|x| bytes::Bytes::copy_from_slice(x))
+            .collect()
     }
 
     pub fn sync(&self) -> Result<(), std::io::Error> {

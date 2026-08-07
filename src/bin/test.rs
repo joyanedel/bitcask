@@ -18,4 +18,6 @@ fn main() {
     let _ = handler.put(b"hello", b"world");
     let val = handler.get(b"hola");
     println!("{val:?}");
+    let keys = handler.list_keys();
+    keys.iter().inspect(|x| println!("-> {:?}", x)).count();
 }
