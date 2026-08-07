@@ -1,13 +1,14 @@
 use std::{
     collections::HashMap,
     ffi::OsString,
-    io::Write,
+    fs::OpenOptions,
+    io::{Read, Seek, Write},
     marker::PhantomData,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bytes::BufMut;
+use bytes::{Buf, BufMut};
 
 type BaseSize = u64;
 
@@ -15,7 +16,8 @@ pub struct BitCaskHandlerOpen;
 pub struct BitCaskHandlerClosed;
 
 pub struct BitCaskHandler<State = BitCaskHandlerClosed> {
-    hashmap: HashMap<bytes::Bytes, BitCaskInMemoryValue>,
+    hashmap: HashMap<Box<[u8]>, BitCaskInMemoryValue>,
+    directory: PathBuf,
     active_file: std::fs::File,
     active_filename: OsString,
     current_active_file_size: BaseSize,
@@ -77,6 +79,7 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
         let hashmap = HashMap::new();
         let handler: BitCaskHandler<BitCaskHandlerOpen> = BitCaskHandler {
             hashmap,
+            directory: directory_path.clone(),
             active_file: f,
             active_filename,
             current_active_file_size: active_file_size_in_bytes as BaseSize,
@@ -91,11 +94,22 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         todo!("implement close method")
     }
 
-    pub fn get(&self, key: bytes::Bytes) -> Option<bytes::Bytes> {
-        todo!("implement get method")
+    pub fn get(&self, key: &[u8]) -> Option<bytes::Bytes> {
+        let in_memory_ref = self.hashmap.get(key)?;
+        let mut file_path = self.directory.clone();
+        file_path.push(in_memory_ref.file_id.clone());
+        let mut f = OpenOptions::new()
+            .read(true)
+            .create(false)
+            .open(file_path)
+            .expect("referenced file does not exist");
+        let _ = f.seek(std::io::SeekFrom::Start(in_memory_ref.value_position));
+        let mut buffer = vec![0; in_memory_ref.value_size as usize];
+        let _ = f.read_exact(&mut buffer);
+        Some(buffer.into())
     }
 
-    pub fn put(&mut self, key: bytes::Bytes, value: bytes::Bytes) -> Result<(), std::io::Error> {
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), std::io::Error> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -107,8 +121,8 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         payload.put_u128(timestamp);
         payload.put_u64(key_size);
         payload.put_u64(value_size);
-        payload.put_slice(&key);
-        payload.put_slice(&value);
+        payload.put_slice(key);
+        payload.put_slice(value);
 
         let crc = calculate_crc32(payload.into());
 
@@ -117,8 +131,8 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
             timestamp,
             key_size,
             value_size,
-            key: key.clone(),
-            value: value.clone(),
+            key: bytes::Bytes::copy_from_slice(key),
+            value: bytes::Bytes::copy_from_slice(value),
         };
 
         let value_position = self.write_row_on_disk(&disk_value_row).unwrap();
@@ -153,12 +167,12 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         self.active_file.flush().unwrap();
 
         self.current_active_file_size += written_bytes as BaseSize;
-        Ok(self.current_active_file_size as BaseSize)
+        Ok(self.current_active_file_size as BaseSize - value.value_size)
     }
 
     fn write_value_in_memory(
         &mut self,
-        key: bytes::Bytes,
+        key: &[u8],
         value_length: BaseSize,
         value_position: BaseSize,
         timestamp: u128,
@@ -171,9 +185,53 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
             timestamp,
         };
 
-        self.hashmap.insert(key, in_memory_value);
+        self.hashmap.insert(Box::from(key), in_memory_value);
 
         Ok(())
+    }
+}
+
+impl TryFrom<bytes::Bytes> for BitCaskDiskRow {
+    type Error = ();
+
+    fn try_from(value: bytes::Bytes) -> Result<Self, Self::Error> {
+        const CRC_OFFSET: usize = 0;
+        const TIMESTAMP_OFFSET: usize = CRC_OFFSET + size_of::<u32>();
+        const KEY_SIZE_OFFSET: usize = TIMESTAMP_OFFSET + size_of::<u128>();
+        const VALUE_SIZE_OFFSET: usize = KEY_SIZE_OFFSET + size_of::<BaseSize>();
+        const KEY_OFFSET: usize = VALUE_SIZE_OFFSET + size_of::<BaseSize>();
+        let crc = value
+            .get(CRC_OFFSET..TIMESTAMP_OFFSET)
+            .map(|mut x| x.get_u32())
+            .unwrap();
+        let timestamp = value
+            .get(TIMESTAMP_OFFSET..KEY_SIZE_OFFSET)
+            .map(|mut x| x.get_u128())
+            .unwrap();
+        let key_size = value
+            .get(KEY_SIZE_OFFSET..VALUE_SIZE_OFFSET)
+            .map(|mut x| x.get_u64())
+            .unwrap();
+        let value_size = value
+            .get(VALUE_SIZE_OFFSET..KEY_OFFSET)
+            .map(|mut x| x.get_u64())
+            .unwrap();
+
+        let value_offset = KEY_OFFSET + key_size as usize;
+        let key = value.get(KEY_OFFSET..value_offset).unwrap();
+        let key = bytes::Bytes::copy_from_slice(key);
+        let value = value
+            .get(value_offset..value_offset + value_size as usize)
+            .unwrap();
+        let value_bytes = bytes::Bytes::copy_from_slice(value);
+        Ok(Self {
+            crc,
+            timestamp,
+            key_size,
+            value_size,
+            key,
+            value: value_bytes,
+        })
     }
 }
 
