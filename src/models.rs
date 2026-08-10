@@ -40,7 +40,7 @@ pub struct BitCaskHandlerOpenOpts {
 pub struct BitCaskInMemoryValue {
     file_id: OsString,
     value_size: BaseSize,
-    value_position: BaseSize,
+    value_offset: BaseSize,
     timestamp: u128,
 }
 
@@ -117,7 +117,7 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
             .create(false)
             .open(in_memory_ref.file_id.clone())
             .expect("referenced file does not exist");
-        let _ = f.seek(std::io::SeekFrom::Start(in_memory_ref.value_position));
+        let _ = f.seek(std::io::SeekFrom::Start(in_memory_ref.value_offset));
         let mut buffer = vec![0; in_memory_ref.value_size as usize];
         let r = f.read_exact(&mut buffer);
         Some(buffer.into())
@@ -149,8 +149,8 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
             value: bytes::Bytes::copy_from_slice(value),
         };
 
-        let value_position = self.write_row_on_disk(&disk_value_row).unwrap();
-        let _ = self.write_value_in_memory(key, value.len() as BaseSize, value_position, timestamp);
+        let value_offset = self.write_row_on_disk(&disk_value_row).unwrap();
+        let _ = self.write_value_in_memory(key, value.len() as BaseSize, value_offset, timestamp);
 
         Ok(())
     }
@@ -191,14 +191,14 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         &mut self,
         key: &[u8],
         value_length: BaseSize,
-        value_position: BaseSize,
+        value_offset: BaseSize,
         timestamp: u128,
     ) -> Result<(), std::io::Error> {
         let file_id = self.active_filename.clone();
         let in_memory_value = BitCaskInMemoryValue {
             file_id,
             value_size: value_length,
-            value_position,
+            value_offset,
             timestamp,
         };
 
@@ -323,7 +323,7 @@ fn populate_in_memory_hash_map_with_file_data(
         let in_memory_val = BitCaskInMemoryValue {
             file_id: file_path.canonicalize().unwrap().as_os_str().to_os_string(),
             value_size: disk_row.value_size,
-            value_position: value_offset as u64,
+            value_offset: value_offset as u64,
             timestamp: disk_row.timestamp,
         };
         hash_map.insert(disk_row.key.to_vec().into_boxed_slice(), in_memory_val);
