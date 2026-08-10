@@ -4,7 +4,7 @@ use bitcask::models::{BitCaskHandler, BitCaskHandlerOpenOpts};
 
 fn main() {
     let mut handler = BitCaskHandler::open(
-        PathBuf::from("test_bitcask_dir"),
+        PathBuf::from("test_dir"),
         BitCaskHandlerOpenOpts {
             max_file_size_in_bytes: 1000,
             mode: bitcask::models::BitCaskHandlerOpenMode::Write,

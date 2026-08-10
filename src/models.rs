@@ -4,6 +4,7 @@ use std::{
     fs::OpenOptions,
     io::{Read, Seek, Write},
     marker::PhantomData,
+    os::linux::fs::MetadataExt,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -63,7 +64,12 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
         directory_path: PathBuf,
         opts: BitCaskHandlerOpenOpts,
     ) -> Result<BitCaskHandler<BitCaskHandlerOpen>, BitCaskHandlerOpenError> {
-        let active_file_path = get_active_file_from_directory(&directory_path)?;
+        // let active_file_path = get_active_file_from_directory(&directory_path)?;
+        let data_entries = get_all_data_entries_in_dir(&directory_path);
+        let active_file_path = match data_entries.as_slice() {
+            [.., target_file] if is_file_active(target_file, &opts) => target_file.clone(),
+            _ => get_default_data_entry(&directory_path),
+        };
 
         // create if does not exist
         let mut open_opts = std::fs::OpenOptions::new();
@@ -77,6 +83,7 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
         let active_file_size_in_bytes = f.metadata().unwrap().len();
 
         let hashmap = HashMap::new();
+
         let handler: BitCaskHandler<BitCaskHandlerOpen> = BitCaskHandler {
             hashmap,
             directory: directory_path.clone(),
@@ -91,7 +98,15 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
 
 impl BitCaskHandler<BitCaskHandlerOpen> {
     pub fn close(self) -> Result<BitCaskHandler<BitCaskHandlerClosed>, std::io::Error> {
-        todo!("implement close method")
+        self.sync()?;
+        Ok(BitCaskHandler {
+            hashmap: self.hashmap,
+            directory: self.directory,
+            active_file: self.active_file,
+            active_filename: self.active_filename,
+            current_active_file_size: self.current_active_file_size,
+            state: PhantomData,
+        })
     }
 
     pub fn get(&self, key: &[u8]) -> Option<bytes::Bytes> {
@@ -253,7 +268,7 @@ fn get_active_file_from_directory(directory: &Path) -> Result<PathBuf, BitCaskHa
         .next()
         .unwrap_or_else(|| {
             let mut dir = directory.to_path_buf();
-            dir.push(format!("{}.bc", current_time));
+            dir.push(format!("{}.bc.data", current_time));
             dir
         });
     Ok(active_file_path)
@@ -275,4 +290,42 @@ fn calculate_crc32(data: bytes::Bytes) -> u32 {
     }
 
     !crc
+}
+
+/// Get all entries in a directory that are data files (e.g ends with .bc.data) sorted by creation time
+fn get_all_data_entries_in_dir(directory: &Path) -> Vec<PathBuf> {
+    let entries = std::fs::read_dir(directory).expect("couldn't read directory");
+    let mut entries: Vec<_> = entries
+        .filter_map(|x| x.ok())
+        .filter(|x| x.path().is_file() && x.path().ends_with(".bc.data"))
+        .map(|x| x.path())
+        .collect();
+
+    entries.sort_by(|a, b| {
+        a.metadata()
+            .unwrap()
+            .created()
+            .unwrap()
+            .cmp(&b.metadata().unwrap().created().unwrap())
+    });
+    entries
+}
+
+/// Returns a pathbuf with default filename (current system time in milliseconds)
+fn get_default_data_entry(directory: &Path) -> PathBuf {
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let mut path = directory.clone().to_path_buf();
+    path.push(format!("{}.bc.data", current_time));
+    path
+}
+
+/// Determines if file is considered active
+fn is_file_active(entry: &Path, bitcask_open_opts: &BitCaskHandlerOpenOpts) -> bool {
+    let metadata = entry
+        .metadata()
+        .expect("couldn't read last valid active file metadata");
+    metadata.st_size() <= bitcask_open_opts.max_file_size_in_bytes
 }
