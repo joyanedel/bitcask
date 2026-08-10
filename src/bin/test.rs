@@ -12,10 +12,8 @@ fn main() {
     )
     .unwrap();
 
-    // let key = bytes::Bytes::from_static(b"hola");
-    // let value = bytes::Bytes::from_static(b"mundo");
-    let _ = handler.put(b"hola", b"mundo");
-    let _ = handler.put(b"hello", b"world");
+    // let _ = handler.put(b"hola", b"mundo");
+    // let _ = handler.put(b"hello", b"world");
     let val = handler.get(b"hola");
     println!("{val:?}");
     let keys = handler.list_keys();

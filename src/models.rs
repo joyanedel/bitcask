@@ -6,6 +6,7 @@ use std::{
     marker::PhantomData,
     os::linux::fs::MetadataExt,
     path::{Path, PathBuf},
+    process::ExitStatus,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -35,6 +36,7 @@ pub struct BitCaskHandlerOpenOpts {
     pub mode: BitCaskHandlerOpenMode,
 }
 
+#[derive(Debug)]
 pub struct BitCaskInMemoryValue {
     file_id: OsString,
     value_size: BaseSize,
@@ -64,12 +66,13 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
         directory_path: PathBuf,
         opts: BitCaskHandlerOpenOpts,
     ) -> Result<BitCaskHandler<BitCaskHandlerOpen>, BitCaskHandlerOpenError> {
-        // let active_file_path = get_active_file_from_directory(&directory_path)?;
         let data_entries = get_all_data_entries_in_dir(&directory_path);
         let active_file_path = match data_entries.as_slice() {
             [.., target_file] if is_file_active(target_file, &opts) => target_file.clone(),
             _ => get_default_data_entry(&directory_path),
         };
+
+        let hashmap = populate_in_memory_table_data(data_entries.as_slice());
 
         // create if does not exist
         let mut open_opts = std::fs::OpenOptions::new();
@@ -79,10 +82,8 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
             .create(true)
             .open(active_file_path.clone())
             .unwrap();
-        let active_filename = active_file_path.file_name().unwrap().to_os_string();
+        let active_filename = active_file_path.canonicalize().unwrap().into_os_string();
         let active_file_size_in_bytes = f.metadata().unwrap().len();
-
-        let hashmap = HashMap::new();
 
         let handler: BitCaskHandler<BitCaskHandlerOpen> = BitCaskHandler {
             hashmap,
@@ -111,16 +112,14 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
 
     pub fn get(&self, key: &[u8]) -> Option<bytes::Bytes> {
         let in_memory_ref = self.hashmap.get(key)?;
-        let mut file_path = self.directory.clone();
-        file_path.push(in_memory_ref.file_id.clone());
         let mut f = OpenOptions::new()
             .read(true)
             .create(false)
-            .open(file_path)
+            .open(in_memory_ref.file_id.clone())
             .expect("referenced file does not exist");
         let _ = f.seek(std::io::SeekFrom::Start(in_memory_ref.value_position));
         let mut buffer = vec![0; in_memory_ref.value_size as usize];
-        let _ = f.read_exact(&mut buffer);
+        let r = f.read_exact(&mut buffer);
         Some(buffer.into())
     }
 
@@ -209,39 +208,17 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
     }
 }
 
-impl TryFrom<bytes::Bytes> for BitCaskDiskRow {
+impl TryFrom<&mut bytes::BytesMut> for BitCaskDiskRow {
     type Error = ();
 
-    fn try_from(value: bytes::Bytes) -> Result<Self, Self::Error> {
-        const CRC_OFFSET: usize = 0;
-        const TIMESTAMP_OFFSET: usize = CRC_OFFSET + size_of::<u32>();
-        const KEY_SIZE_OFFSET: usize = TIMESTAMP_OFFSET + size_of::<u128>();
-        const VALUE_SIZE_OFFSET: usize = KEY_SIZE_OFFSET + size_of::<BaseSize>();
-        const KEY_OFFSET: usize = VALUE_SIZE_OFFSET + size_of::<BaseSize>();
-        let crc = value
-            .get(CRC_OFFSET..TIMESTAMP_OFFSET)
-            .map(|mut x| x.get_u32())
-            .unwrap();
-        let timestamp = value
-            .get(TIMESTAMP_OFFSET..KEY_SIZE_OFFSET)
-            .map(|mut x| x.get_u128())
-            .unwrap();
-        let key_size = value
-            .get(KEY_SIZE_OFFSET..VALUE_SIZE_OFFSET)
-            .map(|mut x| x.get_u64())
-            .unwrap();
-        let value_size = value
-            .get(VALUE_SIZE_OFFSET..KEY_OFFSET)
-            .map(|mut x| x.get_u64())
-            .unwrap();
+    fn try_from(value: &mut bytes::BytesMut) -> Result<Self, Self::Error> {
+        let crc = value.try_get_u32().unwrap();
+        let timestamp = value.try_get_u128().unwrap();
+        let key_size = value.try_get_u64().unwrap();
+        let value_size = value.try_get_u64().unwrap();
+        let key = value.copy_to_bytes(key_size as usize);
+        let value_bytes = value.copy_to_bytes(value_size as usize);
 
-        let value_offset = KEY_OFFSET + key_size as usize;
-        let key = value.get(KEY_OFFSET..value_offset).unwrap();
-        let key = bytes::Bytes::copy_from_slice(key);
-        let value = value
-            .get(value_offset..value_offset + value_size as usize)
-            .unwrap();
-        let value_bytes = bytes::Bytes::copy_from_slice(value);
         Ok(Self {
             crc,
             timestamp,
@@ -251,27 +228,6 @@ impl TryFrom<bytes::Bytes> for BitCaskDiskRow {
             value: value_bytes,
         })
     }
-}
-
-fn get_active_file_from_directory(directory: &Path) -> Result<PathBuf, BitCaskHandlerOpenError> {
-    let current_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let dir_entries = directory.read_dir().unwrap();
-    let active_file_path = dir_entries
-        .filter_map(|v| {
-            v.as_ref()
-                .is_ok_and(|d| d.file_name().into_string().unwrap().ends_with(".bc"))
-                .then(|| v.unwrap().path())
-        })
-        .next()
-        .unwrap_or_else(|| {
-            let mut dir = directory.to_path_buf();
-            dir.push(format!("{}.bc.data", current_time));
-            dir
-        });
-    Ok(active_file_path)
 }
 
 fn calculate_crc32(data: bytes::Bytes) -> u32 {
@@ -297,7 +253,9 @@ fn get_all_data_entries_in_dir(directory: &Path) -> Vec<PathBuf> {
     let entries = std::fs::read_dir(directory).expect("couldn't read directory");
     let mut entries: Vec<_> = entries
         .filter_map(|x| x.ok())
-        .filter(|x| x.path().is_file() && x.path().ends_with(".bc.data"))
+        .filter(|x| {
+            x.path().is_file() && x.path().to_str().is_some_and(|x| x.ends_with(".bc.data"))
+        })
         .map(|x| x.path())
         .collect();
 
@@ -317,7 +275,7 @@ fn get_default_data_entry(directory: &Path) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    let mut path = directory.clone().to_path_buf();
+    let mut path = directory.to_path_buf();
     path.push(format!("{}.bc.data", current_time));
     path
 }
@@ -327,5 +285,47 @@ fn is_file_active(entry: &Path, bitcask_open_opts: &BitCaskHandlerOpenOpts) -> b
     let metadata = entry
         .metadata()
         .expect("couldn't read last valid active file metadata");
+
     metadata.st_size() <= bitcask_open_opts.max_file_size_in_bytes
+}
+
+/// Populates an in-memory table with bitcask data value hints
+fn populate_in_memory_table_data(
+    data_entries: &[PathBuf],
+) -> HashMap<Box<[u8]>, BitCaskInMemoryValue> {
+    let mut hash_map = HashMap::new();
+
+    for data_entry in data_entries {
+        populate_in_memory_hash_map_with_file_data(&mut hash_map, data_entry);
+    }
+
+    hash_map
+}
+
+/// Populate hash map with data in entry
+fn populate_in_memory_hash_map_with_file_data(
+    hash_map: &mut HashMap<Box<[u8]>, BitCaskInMemoryValue>,
+    file_path: &Path,
+) {
+    let mut current_read_position = 0;
+    let mut buffer =
+        bytes::Bytes::from(std::fs::read(file_path).expect("couldn't read immutable data file"))
+            .try_into_mut()
+            .unwrap_or_default();
+    while !buffer.is_empty() {
+        let previous_buffer_size = buffer.len();
+        let disk_row =
+            BitCaskDiskRow::try_from(&mut buffer).expect("couldn't read data from file. corrupted");
+        let current_buffer_size = buffer.len();
+        current_read_position += previous_buffer_size - current_buffer_size;
+
+        let value_offset = current_read_position - disk_row.value_size as usize;
+        let in_memory_val = BitCaskInMemoryValue {
+            file_id: file_path.canonicalize().unwrap().as_os_str().to_os_string(),
+            value_size: disk_row.value_size,
+            value_position: value_offset as u64,
+            timestamp: disk_row.timestamp,
+        };
+        hash_map.insert(disk_row.key.to_vec().into_boxed_slice(), in_memory_val);
+    }
 }
