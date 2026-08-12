@@ -18,5 +18,11 @@ fn main() {
     println!("{val:?}");
     let keys = handler.list_keys();
     keys.iter().inspect(|x| println!("-> {:?}", x)).count();
-    let _ = handler.delete(b"hola");
+    let r = handler.delete(b"hola");
+    if let Err(e) = r {
+        eprintln!("{e}");
+    }
+    let keys = handler.list_keys();
+    println!("--------------");
+    keys.iter().inspect(|x| println!("-> {x:?}")).count();
 }

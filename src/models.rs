@@ -123,42 +123,29 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), std::io::Error> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let key_size = key.len() as BaseSize;
-        let value_size = value.len() as BaseSize;
-
-        let mut payload = bytes::BytesMut::new();
-        payload.put_u128(timestamp);
-        payload.put_u64(key_size);
-        payload.put_u64(value_size);
-        payload.put_slice(key);
-        payload.put_slice(value);
-
-        let crc = calculate_crc32(payload.into());
-
-        let disk_value_row = BitCaskDiskRow {
-            crc,
-            timestamp,
-            key_size,
-            value_size,
-            key: bytes::Bytes::copy_from_slice(key),
-            value: bytes::Bytes::copy_from_slice(value),
-        };
+        let disk_value_row = BitCaskDiskRow::new(key, value);
 
         let value_offset = self.write_row_on_disk(&disk_value_row).unwrap();
-        let _ = self.write_value_in_memory(key, value.len() as BaseSize, value_offset, timestamp);
+        let _ = self.write_value_in_memory(
+            key,
+            value.len() as BaseSize,
+            value_offset,
+            disk_value_row.timestamp,
+        );
 
         Ok(())
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), std::io::Error> {
-        // append tombstone \0 at disk row
-        self.put(key, b"\0")?;
-        // remove from keydir
-        let _ = self.hashmap.remove(&key.to_vec().into_boxed_slice());
+        if self
+            .hashmap
+            .remove(&key.to_vec().into_boxed_slice())
+            .is_none()
+        {
+            return Ok(());
+        }
+        let disk_row_value = BitCaskDiskRow::new(key, b"\0");
+        let _ = self.write_row_on_disk(&disk_row_value);
         Ok(())
     }
 
@@ -208,6 +195,36 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         self.hashmap.insert(Box::from(key), in_memory_value);
 
         Ok(())
+    }
+}
+
+impl BitCaskDiskRow {
+    #[must_use]
+    fn new(key: &[u8], value: &[u8]) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let key_size = key.len() as u64;
+        let value_size = value.len() as u64;
+
+        let crc_payload = [
+            timestamp.to_be_bytes().as_slice(),
+            key_size.to_be_bytes().as_slice(),
+            value_size.to_be_bytes().as_slice(),
+            key,
+            value,
+        ]
+        .concat();
+        let crc = calculate_crc32(crc_payload.into());
+        Self {
+            crc,
+            timestamp,
+            key: bytes::Bytes::copy_from_slice(key),
+            key_size,
+            value: bytes::Bytes::copy_from_slice(value),
+            value_size,
+        }
     }
 }
 
@@ -321,6 +338,17 @@ fn populate_in_memory_hash_map_with_file_data(
             BitCaskDiskRow::try_from(&mut buffer).expect("couldn't read data from file. corrupted");
         let current_buffer_size = buffer.len();
         current_read_position += previous_buffer_size - current_buffer_size;
+
+        if disk_row.value == "\0" {
+            println!("this is dumb");
+            if hash_map
+                .remove(&disk_row.key.to_vec().into_boxed_slice())
+                .is_some()
+            {
+                println!("mish");
+            }
+            continue;
+        }
 
         let value_offset = current_read_position - disk_row.value_size as usize;
         let in_memory_val = BitCaskInMemoryValue {
