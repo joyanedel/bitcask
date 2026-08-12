@@ -1,4 +1,4 @@
-use std::{io::Read, path::PathBuf};
+use std::path::PathBuf;
 
 use bitcask::models::{BitCaskHandler, BitCaskHandlerOpenOpts};
 
@@ -17,7 +17,7 @@ fn main() {
     let val = handler.get(b"hola");
     println!("{val:?}");
     let keys = handler.list_keys();
-    keys.iter().inspect(|x| println!("-> {:?}", x)).count();
+    keys.iter().inspect(|x| println!("-> {x:?}")).count();
     let r = handler.delete(b"hola");
     if let Err(e) = r {
         eprintln!("{e}");
