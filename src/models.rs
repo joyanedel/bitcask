@@ -6,7 +6,6 @@ use std::{
     marker::PhantomData,
     os::linux::fs::MetadataExt,
     path::{Path, PathBuf},
-    process::ExitStatus,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -155,8 +154,12 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         Ok(())
     }
 
-    pub fn delete(&mut self, key: bytes::Bytes) -> Result<(), std::io::Error> {
-        todo!("implement delete method")
+    pub fn delete(&mut self, key: &[u8]) -> Result<(), std::io::Error> {
+        // append tombstone \0 at disk row
+        self.put(key, b"\0")?;
+        // remove from keydir
+        let _ = self.hashmap.remove(&key.to_vec().into_boxed_slice());
+        Ok(())
     }
 
     pub fn list_keys(&self) -> Vec<bytes::Bytes> {
