@@ -3,6 +3,7 @@ use std::{
     ffi::OsString,
     fs::OpenOptions,
     io::{Read, Seek, Write},
+    ops::BitOr,
     os::linux::fs::MetadataExt,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -22,11 +23,27 @@ pub struct BitCaskHandler<State = BitCaskHandlerClosed> {
     active_filename: OsString,
     current_active_file_size: u64,
     _state: std::marker::PhantomData<State>,
+    open_mode: BitCaskHandlerOpenMode,
 }
 
-pub enum BitCaskHandlerOpenMode {
-    Read = 0,
-    Write = 1,
+#[repr(transparent)]
+#[derive(Debug, Clone)]
+pub struct BitCaskHandlerOpenMode(u8);
+
+impl BitOr for BitCaskHandlerOpenMode {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+impl BitCaskHandlerOpenMode {
+    pub const READ: Self = Self(1 << 0);
+    pub const WRITE: Self = Self(1 << 1);
+
+    pub fn contains(&self, mode: Self) -> bool {
+        (self.0 & mode.0) == mode.0
+    }
 }
 
 pub struct BitCaskHandlerOpenOpts {
@@ -38,6 +55,14 @@ pub struct BitCaskHandlerOpenOpts {
 pub enum BitCaskHandlerOpenError {
     #[error("I/O error: {0}")]
     IOError(#[from] std::io::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BitCaskHandlerPutError {
+    #[error("I/O error: {0}")]
+    IOError(#[from] std::io::Error),
+    #[error("Write not allowed in mode: {0:?}")]
+    MissingWritePermission(BitCaskHandlerOpenMode),
 }
 
 impl BitCaskHandler<BitCaskHandlerClosed> {
@@ -70,6 +95,7 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
             active_filename,
             current_active_file_size: active_file_size_in_bytes as u64,
             _state: std::marker::PhantomData,
+            open_mode: opts.mode,
         };
         Ok(handler)
     }
@@ -77,7 +103,10 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
 
 impl BitCaskHandler<BitCaskHandlerOpen> {
     pub fn close(self) -> Result<BitCaskHandler<BitCaskHandlerClosed>, std::io::Error> {
-        self.sync()?;
+        if self.open_mode.contains(BitCaskHandlerOpenMode::WRITE) {
+            self.sync()?;
+        }
+
         Ok(BitCaskHandler {
             key_dir: self.key_dir,
             directory: self.directory,
@@ -85,9 +114,11 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
             active_filename: self.active_filename,
             current_active_file_size: self.current_active_file_size,
             _state: std::marker::PhantomData,
+            open_mode: self.open_mode,
         })
     }
 
+    #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<bytes::Bytes> {
         let in_memory_ref = self.key_dir.get(key)?;
         let mut f = OpenOptions::new()
@@ -96,16 +127,25 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
             .open(in_memory_ref.file_id.clone())
             .expect("referenced file does not exist");
         let _ = f.seek(std::io::SeekFrom::Start(in_memory_ref.value_offset));
-        let mut buffer = vec![0; in_memory_ref.value_size as usize];
+        let mut buffer = vec![
+            0;
+            usize::try_from(in_memory_ref.value_size)
+                .expect("couldn't parse value as usize")
+        ];
         let _ = f.read_exact(&mut buffer);
         Some(buffer.into())
     }
 
-    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), std::io::Error> {
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), BitCaskHandlerPutError> {
+        if !self.open_mode.contains(BitCaskHandlerOpenMode::WRITE) {
+            return Err(BitCaskHandlerPutError::MissingWritePermission(
+                self.open_mode.clone(),
+            ));
+        }
         let disk_value_row = BitCaskDiskRow::new(key, value);
 
-        let value_offset = self.write_row_on_disk(&disk_value_row).unwrap();
-        let _ = self.write_value_in_memory(
+        let value_offset = self.write_row_on_disk(&disk_value_row)?;
+        self.write_value_in_memory(
             key,
             value.len() as u64,
             value_offset,
@@ -149,8 +189,8 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         buffer.put_u64(value.value_size);
         buffer.put_slice(&value.key);
         buffer.put_slice(&value.value);
-        let written_bytes = self.active_file.write(&buffer).unwrap();
-        self.active_file.flush().unwrap();
+        let written_bytes = self.active_file.write(&buffer)?;
+        self.active_file.flush()?;
 
         self.current_active_file_size += written_bytes as u64;
         Ok(self.current_active_file_size - value.value_size)
@@ -162,7 +202,7 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         value_length: u64,
         value_offset: u64,
         timestamp: u128,
-    ) -> Result<(), std::io::Error> {
+    ) {
         let file_id = self.active_filename.clone();
         let in_memory_value = BitCaskInMemoryValue {
             file_id,
@@ -172,8 +212,6 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         };
 
         self.key_dir.insert(Box::from(key), in_memory_value);
-
-        Ok(())
     }
 }
 

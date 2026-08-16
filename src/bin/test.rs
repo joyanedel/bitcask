@@ -8,12 +8,13 @@ fn main() {
         PathBuf::from("test_dir"),
         BitCaskHandlerOpenOpts {
             max_file_size_in_bytes: 1000,
-            mode: BitCaskHandlerOpenMode::Write,
+            mode: BitCaskHandlerOpenMode::READ | BitCaskHandlerOpenMode::WRITE,
         },
     )
     .unwrap();
 
-    // let _ = handler.put(b"hola", b"mundo");
+    // let r = handler.put(b"hola", b"mundo");
+    // println!("result: {r:?}");
     // let _ = handler.put(b"hello", b"world");
     // let val = handler.get(b"hola");
     // println!("{val:?}");
@@ -26,7 +27,7 @@ fn main() {
     // let keys = handler.list_keys();
     // println!("--------------");
     // keys.iter().inspect(|x| println!("-> {x:?}")).count();
-    for _ in 0..1000000 {
+    for _ in 0..1_000_000 {
         let v = handler.get(b"dummy key with long string length");
         let k = handler.list_keys();
 
