@@ -49,6 +49,8 @@ impl BitCaskHandlerOpenMode {
 pub struct BitCaskHandlerOpenOpts {
     pub max_file_size_in_bytes: u64,
     pub mode: BitCaskHandlerOpenMode,
+    /// Indicates if at start time, system must check CRC of entries
+    pub hintfile_checksum_strict: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
