@@ -37,6 +37,6 @@ fn main() {
     // std::hint::black_box(v);
     // std::hint::black_box(k);
     // }
-    let r = handler.list_keys();
-    println!("keys length: {}", r.len());
+    let r = handler.get(b"key 20534");
+    println!("keys length: {:?}", r);
 }
