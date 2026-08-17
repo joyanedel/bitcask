@@ -23,7 +23,7 @@ pub struct BitCaskHandler<State = BitCaskHandlerClosed> {
     active_filename: OsString,
     current_active_file_size: u64,
     _state: std::marker::PhantomData<State>,
-    open_mode: BitCaskHandlerOpenMode,
+    opts: BitCaskHandlerOpenOpts,
 }
 
 #[repr(transparent)]
@@ -79,12 +79,7 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
         let hashmap = populate_in_memory_table_data(data_entries.as_slice());
 
         // create if does not exist
-        let mut open_opts = std::fs::OpenOptions::new();
-        let f = open_opts
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(active_file_path.clone())?;
+        let f = get_active_file_fd(&active_file_path)?;
         let active_filename = active_file_path.canonicalize()?.into_os_string();
         let active_file_size_in_bytes = f.metadata()?.len();
 
@@ -95,7 +90,7 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
             active_filename,
             current_active_file_size: active_file_size_in_bytes as u64,
             _state: std::marker::PhantomData,
-            open_mode: opts.mode,
+            opts,
         };
         Ok(handler)
     }
@@ -103,7 +98,7 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
 
 impl BitCaskHandler<BitCaskHandlerOpen> {
     pub fn close(self) -> Result<BitCaskHandler<BitCaskHandlerClosed>, std::io::Error> {
-        if self.open_mode.contains(BitCaskHandlerOpenMode::WRITE) {
+        if self.opts.mode.contains(BitCaskHandlerOpenMode::WRITE) {
             self.sync()?;
         }
 
@@ -114,7 +109,7 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
             active_filename: self.active_filename,
             current_active_file_size: self.current_active_file_size,
             _state: std::marker::PhantomData,
-            open_mode: self.open_mode,
+            opts: self.opts,
         })
     }
 
@@ -137,9 +132,9 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), BitCaskHandlerPutError> {
-        if !self.open_mode.contains(BitCaskHandlerOpenMode::WRITE) {
+        if !self.opts.mode.contains(BitCaskHandlerOpenMode::WRITE) {
             return Err(BitCaskHandlerPutError::MissingWritePermission(
-                self.open_mode.clone(),
+                self.opts.mode.clone(),
             ));
         }
         let disk_value_row = BitCaskDiskRow::new(key, value);
@@ -189,6 +184,17 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         buffer.put_u64(value.value_size);
         buffer.put_slice(&value.key);
         buffer.put_slice(&value.value);
+
+        // to be written buffer exceeds file size?
+        if self.current_active_file_size + buffer.len() as u64 > self.opts.max_file_size_in_bytes {
+            // set new active file
+            let active_filepath = get_default_data_entry(&self.directory);
+            self.active_file = get_active_file_fd(&active_filepath)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            self.active_filename = active_filepath.canonicalize()?.into_os_string();
+            self.current_active_file_size = 0;
+        }
+
         let written_bytes = self.active_file.write(&buffer)?;
         self.active_file.flush()?;
 
@@ -236,7 +242,7 @@ fn get_default_data_entry(directory: &Path) -> PathBuf {
     let current_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_millis();
+        .as_nanos();
     let mut path = directory.to_path_buf();
     path.push(format!("{current_time}.bc.data"));
     path
@@ -297,4 +303,13 @@ fn populate_in_memory_hash_map_with_file_data(
         };
         hash_map.insert(disk_row.key.to_vec().into_boxed_slice(), in_memory_val);
     }
+}
+
+fn get_active_file_fd(active_file_path: &Path) -> Result<std::fs::File, BitCaskHandlerOpenError> {
+    std::fs::File::options()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(active_file_path)
+        .map_err(BitCaskHandlerOpenError::IOError)
 }

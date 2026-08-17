@@ -7,7 +7,7 @@ fn main() {
     let mut handler = BitCaskHandler::open(
         PathBuf::from("test_dir"),
         BitCaskHandlerOpenOpts {
-            max_file_size_in_bytes: 1000,
+            max_file_size_in_bytes: 5 * 2u64.pow(20), // 5 mibibyte
             mode: BitCaskHandlerOpenMode::READ | BitCaskHandlerOpenMode::WRITE,
         },
     )
@@ -27,11 +27,16 @@ fn main() {
     // let keys = handler.list_keys();
     // println!("--------------");
     // keys.iter().inspect(|x| println!("-> {x:?}")).count();
-    for _ in 0..1_000_000 {
-        let v = handler.get(b"dummy key with long string length");
-        let k = handler.list_keys();
+    // for i in 0..1_000_000 {
+    // let v = handler.get(b"dummy key with long string length");
+    // let k = handler.list_keys();
 
-        std::hint::black_box(v);
-        std::hint::black_box(k);
-    }
+    // let key = format!("key {i}");
+    // let r = handler.put(key.as_bytes(), b"dummy val");
+    // std::hint::black_box(r);
+    // std::hint::black_box(v);
+    // std::hint::black_box(k);
+    // }
+    let r = handler.list_keys();
+    println!("keys length: {}", r.len());
 }
