@@ -1,6 +1,5 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek};
-use std::iter::once;
 use std::ops::BitOr;
 use std::path::{Path, PathBuf};
 
@@ -71,18 +70,9 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
         directory_path: PathBuf,
         opts: BitCaskHandlerOpenOpts,
     ) -> Result<BitCaskHandler<BitCaskHandlerOpen>, BitCaskHandlerOpenError> {
-        let (inactive_data_files, active_data_file) =
-            get_all_segments(&directory_path, opts.max_file_size_in_bytes)?;
-
-        let temporary_active_file_data_as_data_file = DataFile {
-            file_path: active_data_file.file_path.clone(),
-        };
-        let references_file_to_populate_key_dir: Vec<_> = inactive_data_files
-            .iter()
-            .chain(once(&temporary_active_file_data_as_data_file))
-            .map(|x| x.file_path.as_path())
-            .collect();
-        let key_dir = populate_in_memory_table_data(&references_file_to_populate_key_dir);
+        let inactive_data_files = get_all_segments(&directory_path)?;
+        let active_data_file = ActiveDataFile::new(&directory_path)?;
+        let key_dir = populate_in_memory_table_data(&inactive_data_files);
 
         let handler: BitCaskHandler<BitCaskHandlerOpen> = BitCaskHandler {
             key_dir,
@@ -218,11 +208,11 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
 }
 
 /// Populates an in-memory table with bitcask data value hints
-fn populate_in_memory_table_data(data_entries: &[&Path]) -> KeyDirectory {
+fn populate_in_memory_table_data(data_entries: &[DataFile]) -> KeyDirectory {
     let mut key_dir = KeyDirectory::default();
 
     for data_entry in data_entries {
-        populate_in_memory_hash_map_with_file_data(&mut key_dir, data_entry);
+        populate_in_memory_hash_map_with_file_data(&mut key_dir, &data_entry.file_path);
     }
 
     key_dir

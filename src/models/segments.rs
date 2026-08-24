@@ -51,31 +51,14 @@ impl ActiveDataFile {
     }
 }
 
-pub(crate) fn get_all_segments(
-    directory: &Path,
-    max_file_size: u64,
-) -> std::io::Result<(Vec<DataFile>, ActiveDataFile)> {
+pub(crate) fn get_all_segments(directory: &Path) -> std::io::Result<Vec<DataFile>> {
     let data_entries = _get_all_data_entries_in_dir(directory)?;
-    let (data_files, active_file) = match data_entries.as_slice() {
-        [data_filepaths @ .., target_file] if _is_file_active(target_file, max_file_size) => {
-            let data_files: Vec<_> = data_filepaths
-                .iter()
-                .map(PathBuf::to_owned)
-                .map(DataFile::from)
-                .collect();
-            let active_file = ActiveDataFile {
-                file_path: target_file.to_path_buf(),
-                current_file_size: target_file.metadata().unwrap().len(),
-                file_descriptor: _get_active_file_fd(target_file).unwrap(),
-            };
-            (data_files, active_file)
-        }
-        _ => {
-            let active_file = ActiveDataFile::new(directory)?;
-            (vec![] as Vec<DataFile>, active_file)
-        }
-    };
-    Ok((data_files, active_file))
+    let inactive_data_files = data_entries
+        .iter()
+        .map(PathBuf::to_owned)
+        .map(DataFile::from)
+        .collect();
+    Ok(inactive_data_files)
 }
 
 fn _get_active_file_fd(active_file_path: &Path) -> std::io::Result<std::fs::File> {
