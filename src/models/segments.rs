@@ -41,11 +41,16 @@ impl ActiveDataFile {
     }
 
     pub(crate) fn write_and_flush(&mut self, data: &[u8]) -> std::io::Result<u64> {
+        let writte_bytes = self.write(data)?;
+        self.file_descriptor.flush()?;
+        Ok(writte_bytes)
+    }
+
+    pub(crate) fn write(&mut self, data: &[u8]) -> std::io::Result<u64> {
         let written_bytes = self
             .file_descriptor
             .write(data)
             .map(|x| u64::try_from(x).expect("couldn't parse usize as u64"))?;
-        self.file_descriptor.flush()?;
         self.current_file_size += written_bytes;
         Ok(written_bytes)
     }

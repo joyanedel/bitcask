@@ -2,7 +2,7 @@ use std::{ffi::OsString, path::Path};
 
 use crate::models::disk_row::BitCaskDiskRow;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BitCaskInMemoryValue {
     pub(crate) file_id: OsString,
     pub(crate) value_size: u64,

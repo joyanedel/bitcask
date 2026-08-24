@@ -1,10 +1,11 @@
-use std::fs::OpenOptions;
-use std::io::{Read, Seek};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, Write};
 use std::ops::BitOr;
 use std::path::{Path, PathBuf};
 
 use bytes::BufMut;
 
+use crate::models::disk_row::DataHintEntry;
 use crate::models::{
     disk_row::BitCaskDiskRow,
     in_memory::BitCaskInMemoryValue,
@@ -213,6 +214,65 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
 
         self.inactive_data_files
             .push(DataFile::from(data_file.file_path));
+    }
+
+    /// Read immutable old data files, merge and compact values and overwrite values in directory
+    /// eliminating old and stale values
+    ///
+    /// This writes a single immutable data file
+    pub fn merge_and_compact(&mut self) {
+        let mut key_dir = populate_in_memory_table_data(&self.inactive_data_files);
+
+        let mut data_file =
+            ActiveDataFile::new(&self.directory).expect("couldn't open a new data file");
+        let data_file_file_id = data_file.file_path.canonicalize().unwrap().into_os_string();
+        let mut data_hint = File::options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(data_file.file_path.with_extension("hint"))
+            .expect("couldn't create data hint file");
+
+        // write in new file
+        for (key, in_memory_entry) in key_dir.iter_mut_entries() {
+            let value = self.get(key).unwrap();
+
+            // write on disk new entry
+            let disk_entry = BitCaskDiskRow::new(key, &value);
+            let written_bytes = data_file
+                .write(&disk_entry.to_bytes())
+                .expect("couldn't write disk entry");
+
+            // write new data hint entry (to help load keys at startup)
+            let value_offset = data_file.current_file_size - written_bytes;
+            let data_hint_entry = DataHintEntry::from_disk_entry(&disk_entry, value_offset);
+            let _ = data_hint
+                .write(&data_hint_entry.to_bytes())
+                .expect("couldn't write data hint entry");
+
+            // update new key dir
+            in_memory_entry.file_id = data_file_file_id.clone();
+        }
+
+        data_file
+            .file_descriptor
+            .flush()
+            .expect("couldn't flush data file");
+        data_hint.flush().expect("coulnd't flush data hint");
+
+        // remove old files
+        for old_data_file in &self.inactive_data_files {
+            std::fs::remove_file(old_data_file).expect("couldn't remove data file");
+            let dh_result = std::fs::remove_file(old_data_file.file_path.with_extension("hint"));
+            let Err(e) = dh_result else { continue };
+            if !matches!(e.kind(), std::io::ErrorKind::NotFound) {
+                eprintln!("{e:?}");
+            }
+        }
+        self.inactive_data_files = vec![DataFile::from(data_file.file_path)];
+
+        // merge new keys in key dir
+        todo!("merge keys in key directory");
     }
 }
 

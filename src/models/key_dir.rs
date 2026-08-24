@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::IterMut};
 
 use crate::models::in_memory::BitCaskInMemoryValue;
 
@@ -10,6 +10,10 @@ pub(crate) struct KeyDirectory {
 impl KeyDirectory {
     pub(crate) fn get(&self, key: &[u8]) -> Option<&BitCaskInMemoryValue> {
         self.map.get(key)
+    }
+
+    pub(crate) fn iter_mut_entries(&mut self) -> IterMut<'_, Box<[u8]>, BitCaskInMemoryValue> {
+        self.map.iter_mut()
     }
 
     pub(crate) fn put(&mut self, key: &[u8], value: BitCaskInMemoryValue) -> std::io::Result<()> {

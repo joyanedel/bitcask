@@ -14,11 +14,11 @@ fn main() {
     )
     .unwrap();
 
-    // let r = handler.put(b"hola", b"mundo");
-    // println!("result: {r:?}");
-    // let _ = handler.put(b"hello", b"world");
-    // let val = handler.get(b"hola");
-    // println!("{val:?}");
+    let r = handler.put(b"hola", b"mundo");
+    println!("result: {r:?}");
+    let _ = handler.put(b"hello", b"world");
+    let val = handler.get(b"hola");
+    println!("{val:?}");
     let keys = handler.list_keys();
     keys.iter().inspect(|x| println!("-> {x:?}")).count();
     let r = handler.delete(b"hola");
@@ -38,4 +38,6 @@ fn main() {
     // std::hint::black_box(v);
     // std::hint::black_box(k);
     // }
+
+    handler.merge_and_compact();
 }

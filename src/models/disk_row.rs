@@ -1,6 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bytes::Buf;
+use bytes::{Buf, BufMut, BytesMut};
+
+use crate::models::in_memory::BitCaskInMemoryValue;
 
 pub struct BitCaskDiskRow {
     pub(crate) crc: u32,
@@ -9,6 +11,14 @@ pub struct BitCaskDiskRow {
     pub(crate) value_size: u64,
     pub(crate) key: bytes::Bytes,
     pub(crate) value: bytes::Bytes,
+}
+
+#[derive(Debug)]
+pub(crate) struct DataHintEntry {
+    timestamp: u128,
+    key_size: u64,
+    value_size: u64,
+    value_offset: u64,
 }
 
 impl BitCaskDiskRow {
@@ -39,6 +49,25 @@ impl BitCaskDiskRow {
             value_size,
         }
     }
+
+    #[must_use]
+    /// Serialize struct into bytes
+    pub(crate) fn to_bytes(&self) -> bytes::Bytes {
+        let mut buf = BytesMut::with_capacity(
+            size_of::<u32>()
+                + size_of::<u128>()
+                + 2 * size_of::<u64>()
+                + self.key_size as usize
+                + self.value_size as usize,
+        );
+        buf.put_u32(self.crc);
+        buf.put_u128(self.timestamp);
+        buf.put_u64(self.key_size);
+        buf.put_u64(self.value_size);
+        buf.put_slice(&self.key);
+        buf.put_slice(&self.value);
+        buf.freeze()
+    }
 }
 
 impl TryFrom<&mut bytes::BytesMut> for BitCaskDiskRow {
@@ -62,6 +91,43 @@ impl TryFrom<&mut bytes::BytesMut> for BitCaskDiskRow {
             value_size,
             key,
             value: value_bytes,
+        })
+    }
+}
+
+impl DataHintEntry {
+    pub(crate) fn from_disk_entry(disk_entry: &BitCaskDiskRow, value_offset: u64) -> Self {
+        Self {
+            timestamp: disk_entry.timestamp,
+            key_size: disk_entry.key_size,
+            value_size: disk_entry.value_size,
+            value_offset,
+        }
+    }
+
+    pub(crate) fn to_bytes(&self) -> bytes::Bytes {
+        let mut buf = bytes::BytesMut::with_capacity(size_of::<u128>() + 3 * size_of::<u64>());
+        buf.put_u128(self.timestamp);
+        buf.put_u64(self.key_size);
+        buf.put_u64(self.value_size);
+        buf.put_u64(self.value_offset);
+        buf.freeze()
+    }
+}
+
+impl TryFrom<&mut bytes::BytesMut> for DataHintEntry {
+    type Error = ();
+    fn try_from(value: &mut bytes::BytesMut) -> Result<Self, Self::Error> {
+        let timestamp = value.try_get_u128().unwrap();
+        let key_size = value.try_get_u64().unwrap();
+        let value_size = value.try_get_u64().unwrap();
+        let value_offset = value.try_get_u64().unwrap();
+
+        Ok(Self {
+            timestamp,
+            key_size,
+            value_size,
+            value_offset,
         })
     }
 }
