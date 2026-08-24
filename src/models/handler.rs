@@ -281,14 +281,21 @@ fn populate_in_memory_table_data(data_entries: &[DataFile]) -> KeyDirectory {
     let mut key_dir = KeyDirectory::default();
 
     for data_entry in data_entries {
-        populate_in_memory_hash_map_with_file_data(&mut key_dir, &data_entry.file_path);
+        if std::fs::exists(data_entry.file_path.with_extension("hint")).unwrap() {
+            populate_in_memory_hash_map_with_data_hint_file(
+                &mut key_dir,
+                &data_entry.file_path.with_extension("hint"),
+            );
+        } else if std::fs::exists(data_entry.file_path.with_extension("data")).unwrap() {
+            populate_in_memory_hash_map_with_data_file(&mut key_dir, &data_entry.file_path);
+        }
     }
 
     key_dir
 }
 
 /// Populate hash map with data in entry
-fn populate_in_memory_hash_map_with_file_data(key_dir: &mut KeyDirectory, filepath: &Path) {
+fn populate_in_memory_hash_map_with_data_file(key_dir: &mut KeyDirectory, filepath: &Path) {
     let mut current_read_position = 0;
     let mut buffer =
         bytes::Bytes::from(std::fs::read(filepath).expect("couldn't read immutable data file"))
@@ -315,5 +322,17 @@ fn populate_in_memory_hash_map_with_file_data(key_dir: &mut KeyDirectory, filepa
             u64::try_from(value_offset).unwrap(),
         );
         let _ = key_dir.put(&disk_row.key, in_memory_entry);
+    }
+}
+fn populate_in_memory_hash_map_with_data_hint_file(key_dir: &mut KeyDirectory, filepath: &Path) {
+    let mut buffer =
+        bytes::Bytes::from(std::fs::read(filepath).expect("couldn't read immutable data file"))
+            .try_into_mut()
+            .unwrap_or_default();
+    while !buffer.is_empty() {
+        let data_hint_entry =
+            DataHintEntry::try_from(&mut buffer).expect("couldn't read data from file. corrupted");
+        let in_memory_entry = data_hint_entry.to_in_memory_entry(filepath);
+        let _ = key_dir.put(&data_hint_entry.key, in_memory_entry);
     }
 }

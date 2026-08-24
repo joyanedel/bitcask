@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use bytes::{Buf, BufMut, BytesMut};
 
@@ -19,6 +22,7 @@ pub(crate) struct DataHintEntry {
     key_size: u64,
     value_size: u64,
     value_offset: u64,
+    pub(crate) key: bytes::Bytes,
 }
 
 impl BitCaskDiskRow {
@@ -102,16 +106,29 @@ impl DataHintEntry {
             key_size: disk_entry.key_size,
             value_size: disk_entry.value_size,
             value_offset,
+            key: disk_entry.key.clone(),
         }
     }
 
     pub(crate) fn to_bytes(&self) -> bytes::Bytes {
-        let mut buf = bytes::BytesMut::with_capacity(size_of::<u128>() + 3 * size_of::<u64>());
+        let mut buf = bytes::BytesMut::with_capacity(
+            size_of::<u128>() + 3 * size_of::<u64>() + self.key_size as usize,
+        );
         buf.put_u128(self.timestamp);
         buf.put_u64(self.key_size);
         buf.put_u64(self.value_size);
         buf.put_u64(self.value_offset);
+        buf.put_slice(&self.key);
         buf.freeze()
+    }
+
+    pub(crate) fn to_in_memory_entry(&self, file_id: &Path) -> BitCaskInMemoryValue {
+        BitCaskInMemoryValue {
+            file_id: file_id.canonicalize().unwrap().into_os_string(),
+            value_size: self.value_size,
+            value_offset: self.value_offset,
+            timestamp: self.timestamp,
+        }
     }
 }
 
@@ -122,12 +139,15 @@ impl TryFrom<&mut bytes::BytesMut> for DataHintEntry {
         let key_size = value.try_get_u64().unwrap();
         let value_size = value.try_get_u64().unwrap();
         let value_offset = value.try_get_u64().unwrap();
+        let key =
+            value.copy_to_bytes(usize::try_from(key_size).expect("couldn't parse usize as u64"));
 
         Ok(Self {
             timestamp,
             key_size,
             value_size,
             value_offset,
+            key,
         })
     }
 }
