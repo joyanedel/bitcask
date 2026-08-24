@@ -176,7 +176,7 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         if self.active_data_file.current_file_size + buffer.len() as u64
             > self.opts.max_file_size_in_bytes
         {
-            self.active_data_file = ActiveDataFile::new(&self.directory)?;
+            self.set_new_active_file();
         }
 
         self.active_data_file.write_and_flush(&buffer)?;
@@ -204,6 +204,15 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         };
 
         let _ = self.key_dir.put(key, in_memory_value);
+    }
+
+    fn set_new_active_file(&mut self) {
+        let mut data_file =
+            ActiveDataFile::new(&self.directory).expect("couldn't set a new active data file");
+        std::mem::swap(&mut self.active_data_file, &mut data_file);
+
+        self.inactive_data_files
+            .push(DataFile::from(data_file.file_path));
     }
 }
 
