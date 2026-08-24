@@ -1,17 +1,16 @@
-use std::{
-    ffi::OsString,
-    fs::OpenOptions,
-    io::{Read, Seek, Write},
-    ops::BitOr,
-    os::linux::fs::MetadataExt,
-    path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::fs::OpenOptions;
+use std::io::{Read, Seek};
+use std::iter::once;
+use std::ops::BitOr;
+use std::path::{Path, PathBuf};
 
 use bytes::BufMut;
 
 use crate::models::{
-    disk_row::BitCaskDiskRow, in_memory::BitCaskInMemoryValue, key_dir::KeyDirectory,
+    disk_row::BitCaskDiskRow,
+    in_memory::BitCaskInMemoryValue,
+    key_dir::KeyDirectory,
+    segments::{ActiveDataFile, DataFile, get_all_segments},
 };
 
 pub struct BitCaskHandlerOpen;
@@ -20,9 +19,8 @@ pub struct BitCaskHandlerClosed;
 pub struct BitCaskHandler<State = BitCaskHandlerClosed> {
     key_dir: KeyDirectory,
     directory: PathBuf,
-    active_file: std::fs::File,
-    active_filename: OsString,
-    current_active_file_size: u64,
+    active_data_file: ActiveDataFile,
+    inactive_data_files: Vec<DataFile>,
     _state: std::marker::PhantomData<State>,
     opts: BitCaskHandlerOpenOpts,
 }
@@ -73,25 +71,24 @@ impl BitCaskHandler<BitCaskHandlerClosed> {
         directory_path: PathBuf,
         opts: BitCaskHandlerOpenOpts,
     ) -> Result<BitCaskHandler<BitCaskHandlerOpen>, BitCaskHandlerOpenError> {
-        let data_entries = get_all_data_entries_in_dir(&directory_path)?;
-        let active_file_path = match data_entries.as_slice() {
-            [.., target_file] if is_file_active(target_file, &opts) => target_file.clone(),
-            _ => get_default_data_entry(&directory_path),
+        let (inactive_data_files, active_data_file) =
+            get_all_segments(&directory_path, opts.max_file_size_in_bytes)?;
+
+        let temporary_active_file_data_as_data_file = DataFile {
+            file_path: active_data_file.file_path.clone(),
         };
-
-        let hashmap = populate_in_memory_table_data(data_entries.as_slice());
-
-        // create if does not exist
-        let f = get_active_file_fd(&active_file_path)?;
-        let active_filename = active_file_path.canonicalize()?.into_os_string();
-        let active_file_size_in_bytes = f.metadata()?.len();
+        let references_file_to_populate_key_dir: Vec<_> = inactive_data_files
+            .iter()
+            .chain(once(&temporary_active_file_data_as_data_file))
+            .map(|x| x.file_path.as_path())
+            .collect();
+        let key_dir = populate_in_memory_table_data(&references_file_to_populate_key_dir);
 
         let handler: BitCaskHandler<BitCaskHandlerOpen> = BitCaskHandler {
-            key_dir: hashmap,
+            key_dir,
             directory: directory_path.clone(),
-            active_file: f,
-            active_filename,
-            current_active_file_size: active_file_size_in_bytes as u64,
+            active_data_file,
+            inactive_data_files,
             _state: std::marker::PhantomData,
             opts,
         };
@@ -108,9 +105,8 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         Ok(BitCaskHandler {
             key_dir: self.key_dir,
             directory: self.directory,
-            active_file: self.active_file,
-            active_filename: self.active_filename,
-            current_active_file_size: self.current_active_file_size,
+            active_data_file: self.active_data_file,
+            inactive_data_files: self.inactive_data_files,
             _state: std::marker::PhantomData,
             opts: self.opts,
         })
@@ -187,20 +183,14 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         buffer.put_slice(&value.value);
 
         // to be written buffer exceeds file size?
-        if self.current_active_file_size + buffer.len() as u64 > self.opts.max_file_size_in_bytes {
-            // set new active file
-            let active_filepath = get_default_data_entry(&self.directory);
-            self.active_file = get_active_file_fd(&active_filepath)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            self.active_filename = active_filepath.canonicalize()?.into_os_string();
-            self.current_active_file_size = 0;
+        if self.active_data_file.current_file_size + buffer.len() as u64
+            > self.opts.max_file_size_in_bytes
+        {
+            self.active_data_file = ActiveDataFile::new(&self.directory)?;
         }
 
-        let written_bytes = self.active_file.write(&buffer)?;
-        self.active_file.flush()?;
-
-        self.current_active_file_size += written_bytes as u64;
-        Ok(self.current_active_file_size - value.value_size)
+        self.active_data_file.write_and_flush(&buffer)?;
+        Ok(self.active_data_file.current_file_size - value.value_size)
     }
 
     fn write_value_in_memory(
@@ -210,7 +200,12 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
         value_offset: u64,
         timestamp: u128,
     ) {
-        let file_id = self.active_filename.clone();
+        let file_id = self
+            .active_data_file
+            .file_path
+            .canonicalize()
+            .unwrap()
+            .into_os_string();
         let in_memory_value = BitCaskInMemoryValue {
             file_id,
             value_size: value_length,
@@ -222,45 +217,8 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
     }
 }
 
-/// Get all entries in a directory that are data files (e.g ends with .bc.data) sorted by creation time
-fn get_all_data_entries_in_dir(directory: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let entries = std::fs::read_dir(directory)?;
-    let mut entries: Vec<_> = entries
-        .filter_map(Result::ok)
-        .filter(|x| {
-            x.path().is_file() && x.path().to_str().is_some_and(|x| x.ends_with(".bc.data"))
-        })
-        .map(|x| x.path())
-        .collect();
-
-    entries
-        .sort_by_key(|x| unsafe { x.metadata().unwrap_unchecked().created().unwrap_unchecked() });
-    Ok(entries)
-}
-
-/// Returns a pathbuf with default filename (current system time in milliseconds)
-fn get_default_data_entry(directory: &Path) -> PathBuf {
-    let current_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let mut path = directory.to_path_buf();
-    path.push(format!("{current_time}.bc.data"));
-    path
-}
-
-/// Determines if file is considered active
-fn is_file_active(entry: &Path, bitcask_open_opts: &BitCaskHandlerOpenOpts) -> bool {
-    let metadata = entry
-        .metadata()
-        .expect("couldn't read last valid active file metadata");
-
-    metadata.st_size() <= bitcask_open_opts.max_file_size_in_bytes
-}
-
 /// Populates an in-memory table with bitcask data value hints
-fn populate_in_memory_table_data(data_entries: &[PathBuf]) -> KeyDirectory {
-    // let mut hash_map = HashMap::new();
+fn populate_in_memory_table_data(data_entries: &[&Path]) -> KeyDirectory {
     let mut key_dir = KeyDirectory::default();
 
     for data_entry in data_entries {
@@ -271,10 +229,10 @@ fn populate_in_memory_table_data(data_entries: &[PathBuf]) -> KeyDirectory {
 }
 
 /// Populate hash map with data in entry
-fn populate_in_memory_hash_map_with_file_data(key_dir: &mut KeyDirectory, file_path: &Path) {
+fn populate_in_memory_hash_map_with_file_data(key_dir: &mut KeyDirectory, filepath: &Path) {
     let mut current_read_position = 0;
     let mut buffer =
-        bytes::Bytes::from(std::fs::read(file_path).expect("couldn't read immutable data file"))
+        bytes::Bytes::from(std::fs::read(filepath).expect("couldn't read immutable data file"))
             .try_into_mut()
             .unwrap_or_default();
     while !buffer.is_empty() {
@@ -294,18 +252,9 @@ fn populate_in_memory_hash_map_with_file_data(key_dir: &mut KeyDirectory, file_p
                 .expect("couldn't obtain offset due to value size being truncated");
         let in_memory_entry = BitCaskInMemoryValue::from_disk_entry(
             &disk_row,
-            file_path,
+            filepath,
             u64::try_from(value_offset).unwrap(),
         );
         let _ = key_dir.put(&disk_row.key, in_memory_entry);
     }
-}
-
-fn get_active_file_fd(active_file_path: &Path) -> Result<std::fs::File, BitCaskHandlerOpenError> {
-    std::fs::File::options()
-        .read(true)
-        .append(true)
-        .create(true)
-        .open(active_file_path)
-        .map_err(BitCaskHandlerOpenError::IOError)
 }
