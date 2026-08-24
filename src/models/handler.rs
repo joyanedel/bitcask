@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     ffi::OsString,
     fs::OpenOptions,
     io::{Read, Seek, Write},
@@ -11,13 +10,15 @@ use std::{
 
 use bytes::BufMut;
 
-use crate::models::{disk_row::BitCaskDiskRow, in_memory::BitCaskInMemoryValue};
+use crate::models::{
+    disk_row::BitCaskDiskRow, in_memory::BitCaskInMemoryValue, key_dir::KeyDirectory,
+};
 
 pub struct BitCaskHandlerOpen;
 pub struct BitCaskHandlerClosed;
 
 pub struct BitCaskHandler<State = BitCaskHandlerClosed> {
-    key_dir: HashMap<Box<[u8]>, BitCaskInMemoryValue>,
+    key_dir: KeyDirectory,
     directory: PathBuf,
     active_file: std::fs::File,
     active_filename: OsString,
@@ -153,14 +154,11 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), std::io::Error> {
-        if self
-            .key_dir
-            .remove(&key.to_vec().into_boxed_slice())
-            .is_none()
-        {
+        if self.key_dir.delete(key).is_none() {
             return Ok(());
         }
-        let disk_row_value = BitCaskDiskRow::new(key, b"\0");
+        let mut disk_row_value = BitCaskDiskRow::new(key, b"");
+        disk_row_value.timestamp = 0;
         let _ = self.write_row_on_disk(&disk_row_value);
         Ok(())
     }
@@ -168,6 +166,7 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
     pub fn list_keys(&self) -> Vec<bytes::Bytes> {
         self.key_dir
             .keys()
+            .iter()
             .map(|x| bytes::Bytes::copy_from_slice(x))
             .collect()
     }
@@ -219,7 +218,7 @@ impl BitCaskHandler<BitCaskHandlerOpen> {
             timestamp,
         };
 
-        self.key_dir.insert(Box::from(key), in_memory_value);
+        let _ = self.key_dir.put(key, in_memory_value);
     }
 }
 
@@ -260,23 +259,19 @@ fn is_file_active(entry: &Path, bitcask_open_opts: &BitCaskHandlerOpenOpts) -> b
 }
 
 /// Populates an in-memory table with bitcask data value hints
-fn populate_in_memory_table_data(
-    data_entries: &[PathBuf],
-) -> HashMap<Box<[u8]>, BitCaskInMemoryValue> {
-    let mut hash_map = HashMap::new();
+fn populate_in_memory_table_data(data_entries: &[PathBuf]) -> KeyDirectory {
+    // let mut hash_map = HashMap::new();
+    let mut key_dir = KeyDirectory::default();
 
     for data_entry in data_entries {
-        populate_in_memory_hash_map_with_file_data(&mut hash_map, data_entry);
+        populate_in_memory_hash_map_with_file_data(&mut key_dir, data_entry);
     }
 
-    hash_map
+    key_dir
 }
 
 /// Populate hash map with data in entry
-fn populate_in_memory_hash_map_with_file_data(
-    hash_map: &mut HashMap<Box<[u8]>, BitCaskInMemoryValue>,
-    file_path: &Path,
-) {
+fn populate_in_memory_hash_map_with_file_data(key_dir: &mut KeyDirectory, file_path: &Path) {
     let mut current_read_position = 0;
     let mut buffer =
         bytes::Bytes::from(std::fs::read(file_path).expect("couldn't read immutable data file"))
@@ -289,21 +284,20 @@ fn populate_in_memory_hash_map_with_file_data(
         let current_buffer_size = buffer.len();
         current_read_position += previous_buffer_size - current_buffer_size;
 
-        if disk_row.value == "\0" {
-            hash_map.remove(&disk_row.key.to_vec().into_boxed_slice());
+        if disk_row.timestamp == 0 {
+            key_dir.delete(&disk_row.key);
             continue;
         }
 
         let value_offset = current_read_position
             - usize::try_from(disk_row.value_size)
                 .expect("couldn't obtain offset due to value size being truncated");
-        let in_memory_val = BitCaskInMemoryValue {
-            file_id: file_path.canonicalize().unwrap().as_os_str().to_os_string(),
-            value_size: disk_row.value_size,
-            value_offset: value_offset as u64,
-            timestamp: disk_row.timestamp,
-        };
-        hash_map.insert(disk_row.key.to_vec().into_boxed_slice(), in_memory_val);
+        let in_memory_entry = BitCaskInMemoryValue::from_disk_entry(
+            &disk_row,
+            file_path,
+            u64::try_from(value_offset).unwrap(),
+        );
+        let _ = key_dir.put(&disk_row.key, in_memory_entry);
     }
 }
 
